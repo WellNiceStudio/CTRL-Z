@@ -116,16 +116,13 @@ body {
 
    A child of #game-container (position: absolute, not fixed like
    #studio-link) so it's anchored to the CANVAS, not the raw viewport —
-   deliberately the opposite choice from #studio-link, because it needs a
-   predictable, constant spatial relationship with #narrative-display
-   (also canvas-relative) to reliably clear the story caption's own
-   footprint: `bottom` here is chosen so the whole cross sits above the
-   caption's tallest realistic wrap (a few lines) with clearance to spare,
-   which position: fixed (viewport-relative) couldn't guarantee, since the
-   canvas can be centred with unequal empty space above and below it
-   depending on the device's actual viewport height (see main.js
-   resizeToWindow) — that gap size isn't constant, so a viewport-anchored
-   position would drift relative to the caption from device to device.
+   deliberately the opposite choice from #studio-link. It lives in a strip
+   of space main.js reserves below the canvas specifically for it (see
+   resizeToWindow's use of DPAD_TOP_GAP_PX/DPAD_SIZE_PX/DPAD_BOTTOM_MARGIN_PX
+   in gameConfig.js), rather than floating on top of the game art the way
+   it used to — `bottom` here (DPAD_BOTTOM_MARGIN_PX) is just its own
+   margin from the bottom of that reserved strip, not from the canvas.
+   Width/height must stay in sync with CONFIG.DPAD_SIZE_PX.
 
    Each button dispatches real keydown/keyup KeyboardEvents matching the
    same codes as the physical arrow keys (see main.js) — reusing
@@ -136,13 +133,22 @@ body {
   display: none;
   position: absolute;
   left: 16px;
-  bottom: 100px;
-  width: 148px;
-  height: 148px;
+  bottom: 20px; /* CONFIG.DPAD_BOTTOM_MARGIN_PX */
+  width: 148px; /* CONFIG.DPAD_SIZE_PX */
+  height: 148px; /* CONFIG.DPAD_SIZE_PX */
   grid-template-columns: repeat(3, 1fr);
   grid-template-rows: repeat(3, 1fr);
   gap: 4px;
   z-index: 2;
+  /* Long-pressing a button is exactly the gesture a player uses to hold a
+     direction — without this, iOS/Android treat that same press as a
+     text-selection/"Look Up"/copy-callout trigger on the glyph inside,
+     popping up a system menu that eats the touch and makes the D-Pad feel
+     broken. Belt-and-braces with the same rules on .dpad-btn below, since
+     the callout can trigger on either the button or its glyph. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .dpad-btn {
@@ -160,6 +166,11 @@ body {
   justify-content: center;
   padding: 0;
   touch-action: none; /* this button IS the gesture — don't let the browser also treat it as a scroll/zoom */
+  /* See #dpad's own comment above — a held press is this control's normal
+     use, so it must never be interpreted as a select/copy/look-up
+     gesture by the OS. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   transition: background 0.1s ease, color 0.1s ease;
@@ -1014,6 +1025,36 @@ const CONFIG = {
   STUDIO_LINK_OPACITY: 0.65,
   STUDIO_LINK_TOP_PX: 12,
   STUDIO_LINK_RIGHT_PX: 14,
+
+  // --- Year display ---
+  // Internal px from the canvas's own top edge (see main.js, which
+  // multiplies this by DISPLAY_SCALE like every other internal-px value).
+  // A little further down than the bare minimum (was 14) so the year
+  // reads as part of the same composition as the character, objects, and
+  // story text below it, rather than pinned to the extreme top edge.
+  YEAR_DISPLAY_TOP: 20,
+
+  // --- Mobile D-Pad layout ---
+  // The D-Pad sits in a reserved strip BELOW the canvas rather than
+  // floating on top of the game art near the bottom-left corner (its old
+  // position) — see styles.css's #dpad, whose width/height/bottom must
+  // stay in sync with the values here. main.js reserves DPAD_TOP_GAP_PX +
+  // DPAD_SIZE_PX + DPAD_BOTTOM_MARGIN_PX of real extra space below the
+  // canvas (as #game-container's padding-bottom) whenever the touch
+  // D-Pad is actually showing. Because #game-container is centred as a
+  // whole by body's flex layout, adding that padding has the effect of
+  // shifting the canvas — and everything drawn on it: the character,
+  // objects, story text — upward on screen to make room, rather than
+  // just growing the page downward off-screen. The story caption's own
+  // bottom offset (see main.js) is pushed down by that same reserved
+  // amount so it stays pinned the same distance above the CANVAS's
+  // bottom edge instead of drifting toward the D-Pad. Since the caption
+  // only ever grows upward from that fixed bottom edge (never downward,
+  // however many lines it wraps to) and the D-Pad only ever lives in the
+  // reserved space below the canvas, the two can never overlap.
+  DPAD_SIZE_PX: 148, // must match styles.css's #dpad width/height
+  DPAD_TOP_GAP_PX: 20, // real px between the canvas's bottom edge and the D-Pad's top edge
+  DPAD_BOTTOM_MARGIN_PX: 20, // real px between the D-Pad's bottom edge and the reserved strip's bottom edge — must match styles.css's #dpad bottom
 
   // --- Input keys ---
   // Down doubles as both "interact" (when near a collectible object) and
@@ -3761,6 +3802,7 @@ class Game {
 
 
 
+const gameContainer = document.getElementById('game-container');
 const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
 const yearDisplay = document.getElementById('year-display');
@@ -3768,21 +3810,25 @@ const narrativeDisplay = document.getElementById('narrative-display');
 const studioLink = document.getElementById('studio-link');
 
 // Matches where/how big the old canvas-drawn year text used to be (10
-// internal px tall, top edge 14 internal px down), just expressed in real
-// CSS px via DISPLAY_SCALE instead of being rasterized into the canvas.
+// internal px tall), just expressed in real CSS px via DISPLAY_SCALE
+// instead of being rasterized into the canvas. top is set from
+// resizeToWindow (see NARRATIVE_BOTTOM_GAP's sibling comment there) —
+// unlike the year's own vertical offset (CONFIG.YEAR_DISPLAY_TOP), which
+// doesn't depend on the D-Pad/viewport, so it's set once here.
 yearDisplay.style.fontSize = `${10 * CONFIG.DISPLAY_SCALE}px`;
-yearDisplay.style.top = `${14 * CONFIG.DISPLAY_SCALE}px`;
+yearDisplay.style.top = `${CONFIG.YEAR_DISPLAY_TOP * CONFIG.DISPLAY_SCALE}px`;
 yearDisplay.style.color = CONFIG.INK_COLOR;
 
 // The story caption sits along the bottom edge, mirroring the year's
 // placement along the top. Smaller and allowed to wrap (see resizeToWindow
-// for its width, kept in step with the canvas's own CSS size).
+// for its width AND its bottom offset — the latter has to account for
+// the D-Pad's reserved space on touch devices, so it isn't set here).
 narrativeDisplay.style.fontSize = `${7 * CONFIG.DISPLAY_SCALE}px`;
-narrativeDisplay.style.bottom = `${10 * CONFIG.DISPLAY_SCALE}px`;
 narrativeDisplay.style.color = CONFIG.INK_COLOR;
 narrativeDisplay.style.lineHeight = '1.4';
 narrativeDisplay.style.padding = `0 ${8 * CONFIG.DISPLAY_SCALE}px`;
 narrativeDisplay.style.boxSizing = 'border-box';
+const NARRATIVE_BOTTOM_GAP = 10 * CONFIG.DISPLAY_SCALE; // real px between the caption's own bottom edge and the canvas's bottom edge
 
 // Quiet top-right corner credit, pinned to the actual browser window
 // corner (position: fixed — see styles.css) rather than the canvas, so
@@ -3892,6 +3938,31 @@ function resizeToWindow() {
   // Keeps the caption's wrap width matched to the game's own footprint
   // (not the full page) — see #narrative-display in styles.css.
   narrativeDisplay.style.width = `${width * CONFIG.DISPLAY_SCALE}px`;
+
+  // Same touch-primary check styles.css uses to actually show #dpad (see
+  // its media query) — re-read here (rather than assumed once) since
+  // resizeToWindow already reruns on 'resize', which is as good a moment
+  // as any to notice a change (e.g. a tablet switching between a paired
+  // keyboard/mouse and touch-only use).
+  //
+  // On touch devices, reserve DPAD_TOP_GAP_PX + DPAD_SIZE_PX +
+  // DPAD_BOTTOM_MARGIN_PX of real extra height below the canvas, as
+  // #game-container's own padding-bottom, for the D-Pad to live in.
+  // Because the container is centred as a single block by body's flex
+  // layout (see styles.css), padding added at its bottom shifts the
+  // canvas itself upward to make room — moving the character, objects,
+  // and story text up with it — rather than pushing the container off
+  // the bottom of the screen. The caption's bottom offset is pushed down
+  // by that same amount so it stays pinned the same NARRATIVE_BOTTOM_GAP
+  // above the CANVAS's own bottom edge (not the container's, which now
+  // extends further down) — see CONFIG's "Mobile D-Pad layout" comment
+  // for why this guarantees the caption and D-Pad can never overlap.
+  const isTouchDevice = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const dpadReservedSpace = isTouchDevice
+    ? CONFIG.DPAD_TOP_GAP_PX + CONFIG.DPAD_SIZE_PX + CONFIG.DPAD_BOTTOM_MARGIN_PX
+    : 0;
+  gameContainer.style.paddingBottom = `${dpadReservedSpace}px`;
+  narrativeDisplay.style.bottom = `${NARRATIVE_BOTTOM_GAP + dpadReservedSpace}px`;
 
   game.resizeViewport(width);
 }
