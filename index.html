@@ -2670,6 +2670,15 @@ function randomBetween(min, max) {
   return min + Math.random() * (max - min);
 }
 
+/** Fisher-Yates shuffle, in place — see _drawIdleVarietyFromBag(). */
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 class Game {
   constructor(ctx) {
     this.ctx = ctx;
@@ -2733,6 +2742,26 @@ class Game {
     // random wait-then-random-pick, then cleared after use so every cut-in
     // after that (including later wave/come_on picks) goes back to normal.
     this.nextIdleVarietyOverride = 'idle_wave';
+    // Forces the next idle-variety pick to be idle_ipod / idle_phone —
+    // set the instant the iPod / phone is actually collected (see
+    // _updateInteracting/_queueUnlockIdleOverride), so the first idle cut-in
+    // after getting a new item is always "trying out the new thing"
+    // rather than whatever the random rotation happens to land on.
+    // Deliberately a separate field from nextIdleVarietyOverride above:
+    // that one is cleared by _interruptIdleVariety() on every single frame
+    // the player moves, which is fine for the opening wave (consumed
+    // before the player ever takes a step) but would almost always wipe
+    // this one out first, since the player is normally still walking
+    // right after a pickup. This one is only ever consumed by
+    // _updateIdleVariety(), so it patiently survives until the player
+    // actually next stands still, however long that takes.
+    this.pendingUnlockIdleOverride = null;
+    // The shuffled "bag" _drawIdleVarietyFromBag() deals idle-variety picks
+    // from, plus the eligible-pool signature it was last built for (so a
+    // newly-unlocked phone/ipod triggers a fresh shuffle that includes it,
+    // rather than waiting for the stale bag to run out first).
+    this.idleVarietyBag = [];
+    this.idleVarietyBagKey = null;
     // Which sub-phase of the current idle-variety cycle we're in — see
     // _advanceIdleVarietyCycle(): 'playing' (normal forward playback),
     // 'holding' (paused on a specific frame for a timed duration),
@@ -2913,6 +2942,19 @@ class Game {
   _idleIpodUnlocked() {
     const ipod = this.progression.objects.find((obj) => obj.config.id === 'ipod');
     return Boolean(ipod && ipod.collected);
+  }
+
+  /**
+   * Called right as a pickup is collected (see _updateInteracting) —
+   * guarantees the very next idle-variety cut-in after collecting the
+   * iPod / phone is idle_ipod / idle_phone respectively, a "trying out the
+   * new thing" beat, rather than leaving it to the normal rotation (see
+   * pendingUnlockIdleOverride in the constructor for why this is queued
+   * rather than acted on immediately).
+   */
+  _queueUnlockIdleOverride(obj) {
+    if (obj.config.id === 'ipod') this.pendingUnlockIdleOverride = 'idle_ipod';
+    else if (obj.config.id === 'iphone_gen1') this.pendingUnlockIdleOverride = 'idle_phone';
   }
 
   /**
@@ -3159,10 +3201,19 @@ class Game {
     // once, right at game start, so the opening beat is a single
     // deterministic wave instead of the usual random delay + random pick
     // (see the constructor). Once consumed it's cleared, so every cut-in
-    // after that goes back to the normal threshold-gated random pool.
+    // after that goes back to the normal threshold-gated pool.
+    //
+    // pendingUnlockIdleOverride does the same immediate-cut-in-no-delay
+    // thing for the first idle after collecting the phone/iPod (see
+    // _queueUnlockIdleOverride) — checked second so it can never itself
+    // stomp the opening wave, though in practice the wave is long gone by
+    // the time either item is collected.
     if (this.nextIdleVarietyOverride) {
       this.idleVarietyAnimBase = this.nextIdleVarietyOverride;
       this.nextIdleVarietyOverride = null;
+    } else if (this.pendingUnlockIdleOverride) {
+      this.idleVarietyAnimBase = this.pendingUnlockIdleOverride;
+      this.pendingUnlockIdleOverride = null;
     } else if (this.idleTimer >= this.idleVarietyThreshold) {
       // idle_phone / idle_ipod don't make sense before the player has
       // actually picked up a phone / iPod — leave each out of the pool
@@ -3171,7 +3222,7 @@ class Game {
       let pool = IDLE_VARIETY_ANIMATIONS;
       if (!this._idlePhoneUnlocked()) pool = pool.filter((name) => name !== 'idle_phone');
       if (!this._idleIpodUnlocked()) pool = pool.filter((name) => name !== 'idle_ipod');
-      this.idleVarietyAnimBase = pool[Math.floor(Math.random() * pool.length)];
+      this.idleVarietyAnimBase = this._drawIdleVarietyFromBag(pool);
     } else {
       return;
     }
@@ -3180,6 +3231,39 @@ class Game {
     this.idleVarietyPhase = 'playing';
     this.idleVarietyHoldTimer = 0;
     this.player.playAnimation(this.idleVarietyAnimBase, { restart: true });
+  }
+
+  /**
+   * Picks the next idle-variety animation from a shuffled "bag" of the
+   * currently-eligible pool, instead of an independent random pick every
+   * time. A plain independent pick is prone to noticeable streaks purely
+   * by chance (the same animation twice or three times in a row) — fair
+   * over the long run, but it reads as repetitive in the short run, which
+   * is exactly what this is meant to avoid. A shuffled bag guarantees
+   * every eligible animation plays once before any of them repeats, for
+   * an even mix that still feels varied pick to pick.
+   *
+   * The bag is rebuilt (freshly reshuffled) whenever it runs dry, or
+   * whenever the eligible pool itself has changed since it was last built
+   * — e.g. idle_phone/idle_ipod becoming eligible partway through the game
+   * (see _idlePhoneUnlocked/_idleIpodUnlocked) — so a newly-unlocked
+   * animation joins the rotation right away rather than waiting for the
+   * stale bag to empty out first. A fresh bag also avoids opening with a
+   * repeat of whatever was just played (including a pendingUnlockIdleOverride
+   * pick, or the very last item of the previous bag), so the seam between
+   * one bag and the next can't produce a back-to-back repeat either.
+   */
+  _drawIdleVarietyFromBag(pool) {
+    const poolKey = pool.join(',');
+    if (this.idleVarietyBag.length === 0 || this.idleVarietyBagKey !== poolKey) {
+      this.idleVarietyBag = shuffle(pool.slice());
+      this.idleVarietyBagKey = poolKey;
+      if (this.idleVarietyBag.length > 1 && this.idleVarietyBag[0] === this.idleVarietyAnimBase) {
+        const swapWith = 1 + Math.floor(Math.random() * (this.idleVarietyBag.length - 1));
+        [this.idleVarietyBag[0], this.idleVarietyBag[swapWith]] = [this.idleVarietyBag[swapWith], this.idleVarietyBag[0]];
+      }
+    }
+    return this.idleVarietyBag.shift();
   }
 
   /**
@@ -3302,7 +3386,10 @@ class Game {
         this.interactPhase = 'holding';
         this.interactHoldTimer = holdDuration;
         this.player.setAnimationPaused(true);
-        if (!obj.isFinal) obj.collected = true;
+        if (!obj.isFinal) {
+          obj.collected = true;
+          this._queueUnlockIdleOverride(obj);
+        }
       }
       return;
     }
