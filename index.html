@@ -766,21 +766,29 @@ const CONFIG = {
   // read as one hint moving together, not two independent ones.
   PICKUP_PROMPT_ARROW_GAP: 8, // internal px between the text's baseline and the arrow's
 
-  // --- Walk prompt (one-time nudge to get moving, at the very start of
-  // the game) ---
+  // --- Walk prompt (nudge to get moving, early in the game) ---
   // Same drawn-into-canvas approach, font/colour, and instant
   // appear/disappear (no fade) as the pickup prompt (see PICKUP_PROMPT_*
   // above), but anchored above the player's own head instead of above an
   // object, centred (not left-aligned) so it reads as sitting directly
   // over him — see Player.getPromptWorldAnchor / Game.js
-  // _drawWalkPrompt(). Like the pickup hint, this is one-time: it can only
-  // ever appear before the player's very first move (see
-  // _drawWalkPrompt's use of lastMovingAt), and once shown and dismissed
-  // by moving, it never comes back. Eligible to show WALK_PROMPT_DELAY
-  // seconds after the intro's "How did I get here?" line has appeared
-  // (starts typing) — see Game.js _getWalkPromptShowTime() — not from the
-  // very start of the game.
-  WALK_PROMPT_DELAY: 3, // seconds after intro line 2 appears before the walk prompt can show
+  // _drawWalkPrompt(). Not eligible at all until WALK_PROMPT_DELAY seconds
+  // after the intro's "How did I get here?" line has appeared (starts
+  // typing) — see Game.js _getWalkPromptShowTime() — so it never competes
+  // with the intro text itself. From that point on, it's recurring rather
+  // than one-time: it shows any time the player has gone
+  // WALK_PROMPT_IDLE_DELAY seconds without actually moving (see
+  // Game.js's use of lastMovingAt), for as long as the pencil — the very
+  // first object — hasn't scrolled into view yet (Game.js
+  // _pencilAppeared()). That's deliberate: a player who moves the "wrong"
+  // way (or emotes) before ever seeing the prompt would otherwise miss it
+  // forever under the old one-time rule; now it just waits for their next
+  // pause and tries again. It stops at "appeared" rather than "collected"
+  // so it can never overlap with the pickup prompt, which can start
+  // showing as soon as the player gets close to the pencil once it's
+  // visible.
+  WALK_PROMPT_DELAY: 3, // seconds after intro line 2 appears before the walk prompt is eligible at all
+  WALK_PROMPT_IDLE_DELAY: 1, // seconds of standing still before the prompt (re)appears
   WALK_PROMPT_FONT_SIZE: 7,
   // Clearance above the player's own visible top edge. The requested
   // "20px above" is a real, on-screen distance; divided through by
@@ -2715,19 +2723,20 @@ class Game {
     this.emoteHoldKey = null;
 
     // The walk prompt's WORLD-space anchor ({ worldX, y } — see
-    // Player.getPromptWorldAnchor), captured once the first moment it's
-    // shown and then held fixed for the rest of its (one-time) display —
-    // see _drawWalkPrompt(). Without this, re-deriving it from the player
-    // every frame would shift it around as idle-variety animations
-    // (phone/watch/yawn/wave/etc.) cut in and out during the idle
-    // stretch, each with a different pose/bounds — the whole point here
-    // is a prompt that sits still relative to the character and only ever
-    // moves via its own small deliberate bob, not one that hops around as
-    // poses change. Deliberately world-space rather than screen-space
-    // though: _drawWalkPrompt() reprojects it through the current camera
-    // every frame, so it stays correctly glued to the character even if
-    // camera.x moves for some other reason (e.g. a window resize) while
-    // this is showing.
+    // Player.getPromptWorldAnchor), captured once at the start of each
+    // idle stretch it's shown during and then held fixed until that
+    // stretch ends (cleared back to null so the NEXT idle stretch
+    // captures fresh — see _drawWalkPrompt()). Without this, re-deriving
+    // it from the player every frame would shift it around as
+    // idle-variety animations (phone/watch/yawn/wave/etc.) cut in and out
+    // during the idle stretch, each with a different pose/bounds — the
+    // whole point here is a prompt that sits still relative to the
+    // character and only ever moves via its own small deliberate bob, not
+    // one that hops around as poses change. Deliberately world-space
+    // rather than screen-space though: _drawWalkPrompt() reprojects it
+    // through the current camera every frame, so it stays correctly glued
+    // to the character even if camera.x moves for some other reason (e.g.
+    // a window resize) while this is showing.
     this._walkPromptAnchor = null;
 
     // Idle variety (phone / watch / yawn cut in during long idle stretches)
@@ -2955,6 +2964,21 @@ class Game {
   _queueUnlockIdleOverride(obj) {
     if (obj.config.id === 'ipod') this.pendingUnlockIdleOverride = 'idle_ipod';
     else if (obj.config.id === 'iphone_gen1') this.pendingUnlockIdleOverride = 'idle_phone';
+  }
+
+  /**
+   * The walk prompt stops offering itself once the pencil — the very
+   * first object — has scrolled into view (CareerObject.appeared, set by
+   * _updateAppearances), not just once it's actually collected. By the
+   * time it's on screen the player has something concrete to walk
+   * towards, and it's also the point _drawPickupPrompt can start showing
+   * its own "Pick up" hint once they get close enough — the walk prompt
+   * needs to be out of the picture well before then so the two never
+   * appear stacked on top of each other. See _drawWalkPrompt().
+   */
+  _pencilAppeared() {
+    const pencil = this.progression.objects.find((obj) => obj.config.id === 'pencil');
+    return Boolean(pencil && pencil.appeared);
   }
 
   /**
@@ -3490,28 +3514,46 @@ class Game {
    * (no fade — see _drawPickupPrompt above) as the pickup prompt, and now
    * also the same "centred above" placement as that prompt (see
    * Player.getPromptWorldAnchor), just above the character's own head
-   * instead of above an object. Only ever eligible before the player's
-   * very first-ever move (this.lastMovingAt
-   * is still its -Infinity constructor value — see _updateWalking, which
-   * is also why this only ever gets a chance to appear right at the
-   * start of the game): the instant they move for the first time,
-   * lastMovingAt becomes finite and stays that way permanently, so this
-   * can never show again for the rest of the session, even if they go on
-   * to idle for just as long later. Eligible to show starting
-   * CONFIG.WALK_PROMPT_DELAY seconds after the intro's "How did I get
-   * here?" line has appeared — see _getWalkPromptShowTime().
+   * instead of above an object. Recurring rather than one-time: eligible
+   * any time the player has gone CONFIG.WALK_PROMPT_IDLE_DELAY seconds
+   * without moving (this.time - this.lastMovingAt), for as long as the
+   * pencil — the very first object — hasn't scrolled into view yet (see
+   * _pencilAppeared()). That covers a player who moves the "wrong" way,
+   * or emotes, before ever seeing it: rather than being suppressed
+   * forever the instant lastMovingAt first goes finite (the old one-time
+   * rule), it just waits for their next pause and tries again. Stopping at
+   * "appeared" rather than "collected" keeps it from ever overlapping with
+   * _drawPickupPrompt's own "Pick up" hint, which can start showing as
+   * soon as the player gets close to the (by then visible) pencil — the
+   * two are never both trying to occupy the space above/around the player
+   * at once. Also never eligible before CONFIG.WALK_PROMPT_DELAY seconds
+   * after the intro's "How did I get here?" line has appeared — see
+   * _getWalkPromptShowTime() — so it never competes with the intro text
+   * itself, even if the player happens to stand still that whole time.
    */
   _drawWalkPrompt() {
-    if (Number.isFinite(this.lastMovingAt)) return; // already moved at least once — never show again
-    if (this.state !== STATE.WALKING || this.emoting) return;
-    if (this.time < this._getWalkPromptShowTime()) return;
+    const eligible =
+      this.state === STATE.WALKING &&
+      !this.emoting &&
+      this.time >= this._getWalkPromptShowTime() &&
+      this.time - this.lastMovingAt >= CONFIG.WALK_PROMPT_IDLE_DELAY &&
+      !this._pencilAppeared();
 
-    // The WORLD-space anchor is captured once, the first frame it's
-    // shown, then reused as-is for the rest of its (one-time) display —
-    // deliberately NOT recomputed from the player's current pose every
-    // frame, since idle-variety poses (phone/watch/yawn/etc.) have
-    // different sprite bounds that would otherwise make it visibly hop
-    // around as they cut in and out.
+    if (!eligible) {
+      // Stale the instant it's not showing, so the NEXT idle stretch
+      // captures a fresh anchor from wherever the player has since ended
+      // up, rather than reusing a position from long before they last
+      // moved.
+      this._walkPromptAnchor = null;
+      return;
+    }
+
+    // The WORLD-space anchor is captured once per idle stretch (the first
+    // frame it becomes eligible), then reused as-is for the rest of that
+    // stretch's display — deliberately NOT recomputed from the player's
+    // current pose every frame, since idle-variety poses
+    // (phone/watch/yawn/etc.) have different sprite bounds that would
+    // otherwise make it visibly hop around as they cut in and out.
     //
     // What IS recomputed every frame is the screen position derived from
     // that fixed world anchor via the CURRENT camera (see
